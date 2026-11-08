@@ -138,6 +138,11 @@ input[type=range]:focus-visible::-webkit-slider-thumb { background: var(--accent
 .btn.wide, .wide { grid-column: 1 / -1; }
 .btn.ghost { border-color: var(--fg); color: var(--fg); }
 .shoot { min-height: 50px; font-size: 13px; letter-spacing: .32em; }
+.livectl { position: absolute; bottom: 10px; z-index: 2; font: inherit; font-family: var(--mono); font-size: 11px; letter-spacing: .16em; color: var(--fg); background: rgba(0,0,0,.6); border: 1px solid rgba(255,255,255,.25); padding: 8px 12px; min-height: 36px; cursor: pointer; }
+.livectl.l { left: 10px; } .livectl.r { right: 10px; }
+.flash { position: absolute; inset: 0; background: #fff; opacity: .85; pointer-events: none; animation: flash .25s ease-out forwards; }
+@keyframes flash { to { opacity: 0; } }
+body.live .tag:first-of-type { color: #ff5a4f; }
 .topbtns { display: grid; grid-template-columns: 1.5fr 1fr; gap: 8px; }
 .shoot span { display: inline-flex; align-items: center; gap: 10px; }
 .dot { width: 12px; height: 12px; border-radius: 50%; background: #c8302a; }
@@ -166,9 +171,13 @@ input[type=range]:focus-visible::-webkit-slider-thumb { background: var(--accent
       <div class="tag" id="tagL">Changjo</div>
       <div class="tag r" id="tagR">GR · 포지티브 필름</div>
       <div class="busy" id="busy" hidden>Developing</div>
+      <div class="flash" id="flash" hidden></div>
+      <button class="livectl l" id="liveClose" type="button" hidden aria-label="실시간 촬영 끄기">CLOSE</button>
+      <button class="livectl r" id="liveFlip" type="button" hidden aria-label="전면·후면 카메라 전환">FLIP</button>
     </div>
     <div class="topbtns">
-      <label class="btn primary shoot"><span><b class="dot"></b>SHOOT</span><input type="file" id="cam" accept="image/*" capture="environment" aria-label="카메라로 촬영"></label>
+      <button class="btn primary shoot" id="shoot" type="button"><span><b class="dot"></b><span id="shootLabel">SHOOT</span></span></button>
+      <input type="file" id="cam" accept="image/*" capture="environment" hidden aria-hidden="true">
       <label class="btn shoot">IMPORT<input type="file" id="file" accept="image/*" multiple aria-label="사진 불러오기"></label>
     </div>
     <div class="hint"><span id="fileInfo">SHOOT로 촬영하거나 IMPORT로 사진을 불러오세요</span><span>← → 밀어서 룩 변경 · 누르고 있으면 원본</span></div>
@@ -401,7 +410,7 @@ const HERO_SRC = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUEBAQ
     return [(sw-cw)/2, (sh-ch)/2, cw, ch];
   }
   function srcOf(){ return state.cur < 0 ? SAMPLE : state.items[state.cur].img; }
-  function dims(src){ return [src.naturalWidth || src.width, src.naturalHeight || src.height]; }
+  function dims(src){ return [src.videoWidth || src.naturalWidth || src.width, src.videoHeight || src.naturalHeight || src.height]; }
 
   function render(src, maxPx, maxEdge){
     const [sw, sh] = dims(src);
@@ -428,6 +437,7 @@ const HERO_SRC = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUEBAQ
   let raf = 0;
   function draw(){
     cancelAnimationFrame(raf);
+    if (live) return;
     raf = requestAnimationFrame(() => {
       const d = new ImageData(new Uint8ClampedArray(orig.data), orig.width, orig.height);
       process(d.data, d.width, d.height, state.look, state.adj);
@@ -435,6 +445,7 @@ const HERO_SRC = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUEBAQ
     });
   }
   function showOriginal(on){
+    if (live){ $('tagR').textContent = on ? '원본' : tagName(state.look); return; }
     if (on){ cancelAnimationFrame(raf); pctx.putImageData(orig,0,0); $('tagR').textContent = '원본'; }
     else { $('tagR').textContent = tagName(state.look); draw(); }
   }
@@ -541,7 +552,7 @@ const HERO_SRC = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUEBAQ
     });
   }
   let shotNo = 0;
-  async function addFiles(files, append){
+  async function addFiles(files, append, keepLive){
     if (!files.length) return [];
     setMsg('');
     $('busy').hidden = false;
@@ -556,11 +567,12 @@ const HERO_SRC = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUEBAQ
     if (!items.length) return [];
     state.items = append ? state.items.concat(items) : items;
     const idx = append ? state.items.length - 1 : 0;
-    buildStrip(); selectItem(idx);
+    buildStrip(); selectItem(idx, keepLive);
     return items;
   }
   $('file').addEventListener('change', async e => {
     const files = [...e.target.files]; e.target.value = '';
+    if (files.length) stopLive();
     await addFiles(files, false);
   });
   $('cam').addEventListener('change', async e => {
@@ -570,6 +582,89 @@ const HERO_SRC = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUEBAQ
     if (state.autosave) $('save').click();
     else setMsg('촬영한 사진에 룩을 적용했습니다. 마음에 들면 저장하세요.', true);
   });
+  // ---------- live viewfinder ----------
+  let live = null, liveFailed = false, facing = 'environment';
+  const LIVE_EDGE = 720;
+  const hasCam = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  $('shoot').addEventListener('click', () => {
+    if (live) { capture(); return; }
+    if (!hasCam() || liveFailed) { $('cam').click(); return; }
+    startLive();
+  });
+  async function startLive(){
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: facing }, width: { ideal: 4032 }, height: { ideal: 3024 } } });
+      const v = document.createElement('video');
+      v.playsInline = true; v.muted = true; v.setAttribute('playsinline', ''); v.srcObject = stream;
+      await v.play();
+      live = { stream, v, raf: 0 };
+      document.body.classList.add('live');
+      $('liveClose').hidden = false; $('liveFlip').hidden = false;
+      $('shootLabel').textContent = 'CAPTURE';
+      $('tagL').textContent = 'LIVE';
+      $('fileInfo').textContent = '룩을 고르며 화면을 확인하고 CAPTURE로 촬영하세요';
+      setMsg('');
+      liveLoop();
+    } catch (err) {
+      liveFailed = true;
+      const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
+      setMsg(denied ? '카메라 권한이 거부됐어요. 아이폰 설정의 Safari 카메라 권한을 허용하거나, SHOOT를 다시 누르면 기본 카메라로 촬영해요.'
+                    : '실시간 카메라를 열지 못했어요. SHOOT를 다시 누르면 기본 카메라로 촬영해요.');
+    }
+  }
+  function stopLive(){
+    if (!live) return;
+    cancelAnimationFrame(live.raf);
+    live.stream.getTracks().forEach(t => t.stop());
+    live = null;
+    document.body.classList.remove('live');
+    $('liveClose').hidden = true; $('liveFlip').hidden = true;
+    $('shootLabel').textContent = 'SHOOT';
+    if (state.cur >= 0) selectItem(state.cur, true);
+    else { $('tagL').textContent = 'Changjo'; $('fileInfo').textContent = 'SHOOT로 촬영하거나 IMPORT로 사진을 불러오세요'; buildPreviewSource(); draw(); }
+  }
+  function liveLoop(){
+    if (!live) return;
+    const v = live.v;
+    if (v.videoWidth){
+      const [sx, sy, cw, ch] = cropRect(v.videoWidth, v.videoHeight);
+      const k = Math.min(1, LIVE_EDGE / Math.max(cw, ch));
+      const w = Math.round(cw*k), h = Math.round(ch*k);
+      if (preview.width !== w || preview.height !== h){ preview.width = w; preview.height = h; }
+      pctx.drawImage(v, sx, sy, cw, ch, 0, 0, w, h);
+      if (!holding){
+        const d = pctx.getImageData(0, 0, w, h);
+        process(d.data, w, h, state.look, state.adj);
+        pctx.putImageData(d, 0, 0);
+      }
+    }
+    live.raf = requestAnimationFrame(liveLoop);
+  }
+  async function capture(){
+    if (!live || !live.v.videoWidth) return;
+    const v = live.v, c = document.createElement('canvas');
+    c.width = v.videoWidth; c.height = v.videoHeight;
+    c.getContext('2d').drawImage(v, 0, 0);
+    const f = $('flash'); f.hidden = false; f.style.animation = 'none'; void f.offsetWidth; f.style.animation = '';
+    setTimeout(() => { f.hidden = true; }, 260);
+    const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.95));
+    c.width = c.height = 1;
+    if (!blob) return;
+    const added = await addFiles([new File([blob], 'live.jpg', { type: 'image/jpeg' })], true, true);
+    if (!added.length) return;
+    if (state.autosave) $('save').click();
+    else setMsg(`${state.items.length}장 촬영 · 아래 필름 스트립에서 확인하고 SAVE로 저장하세요`, true);
+  }
+  $('liveClose').addEventListener('click', e => { e.stopPropagation(); stopLive(); });
+  $('liveFlip').addEventListener('click', async e => {
+    e.stopPropagation();
+    facing = facing === 'environment' ? 'user' : 'environment';
+    if (live){ cancelAnimationFrame(live.raf); live.stream.getTracks().forEach(t => t.stop()); live = null; }
+    await startLive();
+  });
+  ['pointerdown','pointerup'].forEach(t => { $('liveClose').addEventListener(t, e => e.stopPropagation()); $('liveFlip').addEventListener(t, e => e.stopPropagation()); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stopLive(); });
+
   $('autosave').addEventListener('change', e => { state.autosave = e.target.checked; persist(); });
   function buildStrip(){
     const strip = $('strip'); strip.innerHTML = '';
@@ -584,7 +679,8 @@ const HERO_SRC = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUEBAQ
       strip.appendChild(b);
     });
   }
-  function selectItem(i){
+  function selectItem(i, keepLive){
+    if (live && !keepLive) stopLive();
     state.cur = i;
     $('strip').querySelectorAll('button').forEach((b,k) => b.setAttribute('aria-current', k===i));
     const it = state.items[i], [w,h] = dims(it.img);
@@ -592,6 +688,7 @@ const HERO_SRC = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUEBAQ
     const sb = $('strip').children[i]; if (sb) sb.scrollIntoView({ block:'nearest', inline:'nearest' });
     $('fileInfo').textContent = `${it.name} · ${w}×${h}`;
     buildPreviewSource(); draw();
+    if (live) $('tagL').textContent = 'LIVE';
   }
 
   // ---------- save ----------
