@@ -143,7 +143,9 @@ input[type=range]:focus-visible::-webkit-slider-thumb { background: var(--accent
 .flash { position: absolute; inset: 0; background: #fff; opacity: .85; pointer-events: none; animation: flash .25s ease-out forwards; }
 @keyframes flash { to { opacity: 0; } }
 body.live .tag:first-of-type { color: #ff5a4f; }
-.topbtns { display: grid; grid-template-columns: 1.5fr 1fr; gap: 8px; }
+.topbtns { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 8px; }
+.topbtns .shoot { letter-spacing: .2em; padding-inline: 4px; }
+.topbtns .primary.shoot { letter-spacing: .28em; }
 .shoot span { display: inline-flex; align-items: center; gap: 10px; }
 .dot { width: 12px; height: 12px; border-radius: 50%; background: #c8302a; }
 .autos { border-top: 0; }
@@ -179,6 +181,7 @@ body.live .tag:first-of-type { color: #ff5a4f; }
       <button class="btn primary shoot" id="shoot" type="button"><span><b class="dot"></b><span id="shootLabel">SHOOT</span></span></button>
       <input type="file" id="cam" accept="image/*" capture="environment" hidden aria-hidden="true">
       <label class="btn shoot">IMPORT<input type="file" id="file" accept="image/*" multiple aria-label="사진 불러오기"></label>
+      <button class="btn ghost shoot" id="save" type="button">SAVE</button>
     </div>
     <div class="hint"><span id="fileInfo">SHOOT로 촬영하거나 IMPORT로 사진을 불러오세요</span><span>← → 밀어서 룩 변경 · 누르고 있으면 원본</span></div>
     <div class="strip" id="strip" hidden></div>
@@ -207,7 +210,6 @@ body.live .tag:first-of-type { color: #ff5a4f; }
     </div>
 
     <div class="actions">
-      <button class="btn ghost wide" id="save" type="button">SAVE</button>
       <div class="toggle wide autos">
         <div><span style="font-size:13.5px">찍으면 바로 저장</span><small>촬영 직후 현재 룩으로 현상해 갤러리 저장 화면을 띄웁니다</small></div>
         <label class="switch"><input type="checkbox" id="autosave" aria-label="찍으면 바로 저장"><i></i></label>
@@ -764,6 +766,7 @@ body.live .tag:first-of-type { color: #ff5a4f; }
     setMsg(r === 'saved' ? (n > 1 ? `${n}장을 앨범으로 보냈어요.` : '앨범으로 보냈어요.') : r === 'canceled' ? '저장을 취소했습니다.' : '', r === 'saved');
   }
   $('save').addEventListener('click', async () => {
+    if (state.cur < 0){ setMsg(live ? '먼저 CAPTURE로 촬영하세요.' : 'SHOOT로 촬영하거나 IMPORT로 사진을 불러온 뒤 저장하세요.'); return; }
     const b = $('save'); b.disabled = true; $('busy').hidden = false; setMsg('고해상도로 현상하는 중…');
     await tick();
     try {
