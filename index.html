@@ -714,64 +714,79 @@ body.live .tag:first-of-type { color: #ff5a4f; }
     const base = idx < 0 ? 'changjo' : state.items[idx].name.replace(/\.[^.]+$/, '');
     return `${base}_GR-${state.look}.jpg`;
   }
-  // Gallery save: show the developed photo; the share sheet's “이미지 저장” (or long-press → 사진 앱에 추가) writes to Photos.
-  let sheetBlob = null, sheetName = '', sheetSaved = false;
-  function canShareFiles(){ try { return !!(navigator.canShare && navigator.canShare({ files: [new File([new Blob(['x'],{type:'image/jpeg'})], 'x.jpg', { type: 'image/jpeg' })] })); } catch(e){ return false; } }
-  async function saveOne(idx){
-    const blob = await renderFull(idx);
-    if (!blob) throw new Error('encode');
-    sheetBlob = blob; sheetName = outName(idx); sheetSaved = false;
-    $('sheetImg').src = URL.createObjectURL(blob);
-    $('sheetSave').hidden = !(downloads || canShareFiles());
-    $('sheetSave').disabled = false;
-    $('sheetHint').innerHTML = downloads
-      ? '아래 버튼을 누른 뒤 <b>‘이미지 저장’</b>을 고르면 사진 앱에 들어갑니다<br><small style="color:var(--mute)">또는 사진을 길게 눌러 ‘사진 앱에 추가’</small>'
+  // Gallery save: one tap on SAVE opens the iOS share sheet directly ("이미지 저장" → Photos).
+  // If iOS needs a fresh tap (long developing), a one-button sheet asks for it.
+  function canShareFiles(files){
+    try {
+      const f = files || [new File([new Blob(['x'], { type: 'image/jpeg' })], 'x.jpg', { type: 'image/jpeg' })];
+      return !!(navigator.share && navigator.canShare && navigator.canShare({ files: f }));
+    } catch(e){ return false; }
+  }
+  let sheetFiles = null, sheetDone = null;
+  async function deliver(blobs, names){
+    const files = blobs.map((bl, i) => new File([bl], names[i], { type: 'image/jpeg' }));
+    if (canShareFiles(files)){
+      try { await navigator.share({ files }); return 'saved'; }
+      catch(err){ if (err && err.name === 'AbortError') return 'canceled'; }
+    }
+    return openSheet(blobs, files);
+  }
+  function openSheet(blobs, files){
+    sheetFiles = files;
+    $('sheetImg').src = URL.createObjectURL(blobs[0]);
+    const can = canShareFiles(files);
+    $('sheetSave').hidden = !can; $('sheetSave').disabled = false;
+    $('sheetSave').textContent = files.length > 1 ? `SAVE ${files.length} TO PHOTOS` : 'SAVE TO PHOTOS';
+    $('sheetHint').innerHTML = can
+      ? '버튼을 누르고 <b>‘이미지 저장’</b>을 고르면 앨범에 들어갑니다'
       : '사진을 길게 눌러 <b>‘사진 앱에 추가’</b>를 고르세요';
     $('sheetMsg').textContent = ''; $('sheetMsg').className = 'msg';
     $('sheet').hidden = false;
-    await new Promise(res => $('sheetClose').addEventListener('click', res, { once:true }));
-    return sheetSaved ? 'saved' : 'closed';
+    return new Promise(res => { sheetDone = res; });
+  }
+  function closeSheet(result){
+    $('sheet').hidden = true;
+    const s = $('sheetImg').src; if (s) URL.revokeObjectURL(s); $('sheetImg').removeAttribute('src');
+    sheetFiles = null;
+    if (sheetDone){ const d = sheetDone; sheetDone = null; d(result); }
   }
   $('sheetSave').addEventListener('click', async () => {
-    if (!sheetBlob || !(downloads || canShareFiles())) return;
-    const b = $('sheetSave'), m = $('sheetMsg'); b.disabled = true;
-    try {
-      if (downloads) await downloads.save({ filename: sheetName, data: sheetBlob });
-      else await navigator.share({ files: [new File([sheetBlob], sheetName, { type: 'image/jpeg' })] });
-      sheetSaved = true; m.textContent = '‘이미지 저장’을 골랐다면 사진 앱에 들어갔어요. CLOSE를 눌러 계속하세요.'; m.className = 'msg ok';
-    } catch(err){
-      const c = err && (err.code || (err.name === 'AbortError' ? 'declined' : ''));
-      m.textContent = c === 'declined' ? '저장을 취소했습니다.' : c === 'rate_limited' ? '이미 저장 창이 열려 있습니다. 잠시 후 다시 눌러 주세요.' : '이 화면에서는 공유 시트를 열 수 없어요. 사진을 길게 눌러 저장해 주세요.';
+    if (!sheetFiles) return;
+    const b = $('sheetSave'); b.disabled = true;
+    try { await navigator.share({ files: sheetFiles }); closeSheet('saved'); return; }
+    catch(err){
+      const m = $('sheetMsg');
+      m.textContent = err && err.name === 'AbortError' ? '저장을 취소했습니다.' : '공유 시트를 열 수 없어요. 사진을 길게 눌러 저장해 주세요.';
       m.className = 'msg';
     }
     b.disabled = false;
   });
+  $('sheetClose').addEventListener('click', () => closeSheet('closed'));
+  function report(r, n){
+    setMsg(r === 'saved' ? (n > 1 ? `${n}장을 앨범으로 보냈어요.` : '앨범으로 보냈어요.') : r === 'canceled' ? '저장을 취소했습니다.' : '', r === 'saved');
+  }
   $('save').addEventListener('click', async () => {
     const b = $('save'); b.disabled = true; $('busy').hidden = false; setMsg('고해상도로 현상하는 중…');
     await tick();
     try {
+      const blob = await renderFull(state.cur);
       $('busy').hidden = true; setMsg('');
-      await saveOne(state.cur);
+      report(await deliver([blob], [outName(state.cur)]), 1);
     } catch(e){ setMsg('사진을 만들지 못했습니다. 다른 사진으로 다시 시도해 주세요.'); }
     $('busy').hidden = true; b.disabled = false;
   });
   $('saveAll').addEventListener('click', async () => {
     const b = $('saveAll'); b.disabled = true; $('save').disabled = true;
-    let ok = 0;
-    for (let i=0;i<state.items.length;i++){
-      setMsg(`${i+1} / ${state.items.length} 현상 중…`); $('busy').hidden = false; await tick();
-      try {
-        $('busy').hidden = true;
-        const r = await saveOne(i);
-        if (r === 'saved') ok++;
-      } catch(e){}
-    }
-    $('busy').hidden = true;
-    setMsg(ok ? `${ok}장을 사진 앱으로 보냈습니다.` : '모두 확인했습니다.', ok>0);
+    const blobs = [], names = [];
+    try {
+      for (let i = 0; i < state.items.length; i++){
+        setMsg(`${i+1} / ${state.items.length} 현상 중…`); $('busy').hidden = false; await tick();
+        blobs.push(await renderFull(i)); names.push(outName(i));
+      }
+      $('busy').hidden = true; setMsg('');
+      report(await deliver(blobs, names), blobs.length);
+    } catch(e){ $('busy').hidden = true; setMsg('일부 사진을 만들지 못했습니다. 다시 시도해 주세요.'); }
     b.disabled = false; $('save').disabled = false;
-  });
-  $('sheetClose').addEventListener('click', () => {
-    $('sheet').hidden = true; const s=$('sheetImg').src; if (s) URL.revokeObjectURL(s); $('sheetImg').removeAttribute('src'); sheetBlob = null;
   });
 
   // ---------- boot ----------
