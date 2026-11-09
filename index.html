@@ -146,6 +146,7 @@ body.live .tag:first-of-type { color: #ff5a4f; }
 .topbtns { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 8px; }
 .topbtns .shoot { letter-spacing: .2em; padding-inline: 4px; }
 .topbtns .primary.shoot { letter-spacing: .28em; }
+.topbtns .saveall { grid-column: 1 / -1; min-height: 44px; }
 .shoot span { display: inline-flex; align-items: center; gap: 10px; }
 .dot { width: 12px; height: 12px; border-radius: 50%; background: #c8302a; }
 .autos { border-top: 0; }
@@ -182,6 +183,7 @@ body.live .tag:first-of-type { color: #ff5a4f; }
       <input type="file" id="cam" accept="image/*" capture="environment" hidden aria-hidden="true">
       <label class="btn shoot">IMPORT<input type="file" id="file" accept="image/*" multiple aria-label="사진 불러오기"></label>
       <button class="btn ghost shoot" id="save" type="button">SAVE</button>
+      <button class="btn shoot saveall" id="saveAll" type="button" hidden>SAVE ALL</button>
     </div>
     <div class="hint"><span id="fileInfo">SHOOT로 촬영하거나 IMPORT로 사진을 불러오세요</span><span>← → 밀어서 룩 변경 · 누르고 있으면 원본</span></div>
     <div class="strip" id="strip" hidden></div>
@@ -214,7 +216,6 @@ body.live .tag:first-of-type { color: #ff5a4f; }
         <div><span style="font-size:13.5px">찍으면 바로 저장</span><small>촬영 직후 현재 룩으로 현상해 갤러리 저장 화면을 띄웁니다</small></div>
         <label class="switch"><input type="checkbox" id="autosave" aria-label="찍으면 바로 저장"><i></i></label>
       </div>
-      <button class="btn wide" id="saveAll" type="button" hidden>SAVE ALL</button>
     </div>
     <p class="msg" id="msg" role="status"></p>
   </section>
@@ -326,19 +327,17 @@ body.live .tag:first-of-type { color: #ff5a4f; }
     }
     return { base, look };
   }
-  function process(data, w, h, lookId, adj){
+  function process(data, w, h, lookId, adj, opts){
     const p = byId[lookId].p;
     const { base, look } = chanLUTs(p, adj);
     const cl = conLUT(p.con), N = 2048;
-    const amt = adj.amt/100, gr = adj.grain/100 * 0.16, vig = adj.vig/100 * 0.62;
+    const amt = adj.amt/100, vig = adj.vig/100 * 0.62;
     const sat = p.sat, rpop = p.rpop, bpop = p.bpop, gsh = p.gsh, bsh = p.bsh, mono = p.mono;
     const sh = p.sh, hi = p.hi, lift = p.lift, span = p.roll - p.lift;
     const cx = (w-1)/2, cy = (h-1)/2;
     const dx2 = new Float32Array(w), dy2 = new Float32Array(h);
     for (let x=0;x<w;x++){ const d=(x-cx)/(cx||1); dx2[x]=d*d; }
     for (let y=0;y<h;y++){ const d=(y-cy)/(cy||1); dy2[y]=d*d; }
-    let seed = 0x9e3779b9 ^ (w*31 + h);
-    const rnd = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return (seed >>> 0) / 4294967296; };
     const c = v => v < 0 ? 0 : v > 1 ? 1 : v;
     let i = 0;
     for (let y=0;y<h;y++){
@@ -365,8 +364,59 @@ body.live .tag:first-of-type { color: #ff5a4f; }
         r = lift + r*span; g = lift + g*span; b = lift + b*span;
         r = br + (r-br)*amt; g = bg + (g-bg)*amt; b = bb + (b-bb)*amt;
         if (vig){ const d = (dx2[x] + ry)*0.5; const f = 1 - vig*d*(0.35+0.65*d); r*=f; g*=f; b*=f; }
-        if (gr){ const n = (rnd() + rnd() - 1) * gr * (1 - Math.abs(2*l-1)*0.55); r+=n; g+=n; b+=n; }
         data[i] = c(r)*255 + 0.5; data[i+1] = c(g)*255 + 0.5; data[i+2] = c(b)*255 + 0.5;
+      }
+    }
+    if (opts && opts.sharpen) sharpen(data, w, h, opts.sharpen);
+    if (adj.grain > 0) addGrain(data, w, h, adj.grain/100, opts && opts.fast);
+  }
+
+  // Unsharp mask (5-tap), rolling row buffers so no full-image copy
+  function sharpen(data, w, h, amt){
+    const W4 = w*4; let prev = data.slice(0, W4), cur = data.slice(W4, 2*W4);
+    for (let y = 1; y < h-1; y++){
+      const o = y*W4, next = y+1;
+      for (let x = 4; x < W4-4; x++){
+        if ((x & 3) === 3) continue;
+        const v = cur[x];
+        const blur = (v*4 + cur[x-4] + cur[x+4] + prev[x] + data[next*W4 + x]) / 8;
+        data[o + x] = v + amt*(v - blur)*2;
+      }
+      prev = cur; cur = data.slice(next*W4, next*W4 + W4);
+    }
+  }
+
+  // Film grain: clumped noise sized to the image (~1400 grains across), strongest in midtones
+  let grainCache = null;
+  function grainGrid(gw, gh){
+    let seed = (Math.random()*4294967295 >>> 0) || 1;
+    const g = new Float32Array(gw*gh);
+    for (let k = 0; k < g.length; k++){
+      let a = 0;
+      for (let j = 0; j < 3; j++){ seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; a += (seed >>> 0) / 4294967296; }
+      g[k] = (a - 1.5) * 1.15;
+    }
+    return g;
+  }
+  function addGrain(data, w, h, amt, fast){
+    const cell = Math.max(1, Math.max(w, h) / 1400), inv = 1/cell;
+    const PAD = 64;
+    let gw = Math.ceil(w*inv) + 2, gh = Math.ceil(h*inv) + 2, g, ox = 0, oy = 0;
+    if (fast){
+      if (!grainCache || grainCache.gw !== gw + PAD || grainCache.gh !== gh + PAD) grainCache = { gw: gw + PAD, gh: gh + PAD, g: grainGrid(gw + PAD, gh + PAD) };
+      g = grainCache.g; ox = (Math.random()*PAD) | 0; oy = (Math.random()*PAD) | 0; gw += PAD;
+    } else g = grainGrid(gw, gh);
+    const A = amt * 66 * (1 + 0.35*Math.min(1, cell - 1));
+    let i = 0;
+    for (let y = 0; y < h; y++){
+      const fy = y*inv, y0 = fy | 0, ty = fy - y0, r0 = (y0 + oy)*gw + ox, r1 = r0 + gw;
+      for (let x = 0; x < w; x++, i += 4){
+        let n;
+        if (cell === 1) n = g[r0+x];
+        else { const fx = x*inv, x0 = fx | 0, tx = fx - x0; n = (g[r0+x0]*(1-tx) + g[r0+x0+1]*tx)*(1-ty) + (g[r1+x0]*(1-tx) + g[r1+x0+1]*tx)*ty; }
+        const l = (data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114) / 255, m = 2*l - 1;
+        const v = n * A * (0.35 + 0.65*(1 - m*m));
+        data[i] += v; data[i+1] += v; data[i+2] += v;
       }
     }
   }
@@ -585,7 +635,7 @@ body.live .tag:first-of-type { color: #ff5a4f; }
   });
   // ---------- live viewfinder ----------
   let live = null, liveFailed = false, facing = 'environment';
-  const LIVE_EDGE = 720;
+  const LIVE_EDGE = 900;
   const hasCam = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
   $('shoot').addEventListener('click', () => {
     if (live) { capture(); return; }
@@ -597,6 +647,11 @@ body.live .tag:first-of-type { color: #ff5a4f; }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: facing }, width: { ideal: 4032 }, height: { ideal: 3024 } } });
       const v = document.createElement('video');
       v.playsInline = true; v.muted = true; v.setAttribute('playsinline', ''); v.srcObject = stream;
+      const track = stream.getVideoTracks()[0];
+      try {
+        const caps = track.getCapabilities ? track.getCapabilities() : null;
+        if (caps && caps.width && caps.height && caps.width.max) await track.applyConstraints({ width: { ideal: caps.width.max }, height: { ideal: caps.height.max } });
+      } catch(e){}
       await v.play();
       live = { stream, v, raf: 0, thumbAt: 0 };
       document.body.classList.add('live');
@@ -636,7 +691,7 @@ body.live .tag:first-of-type { color: #ff5a4f; }
       pctx.drawImage(v, sx, sy, cw, ch, 0, 0, w, h);
       if (!holding){
         const d = pctx.getImageData(0, 0, w, h);
-        process(d.data, w, h, state.look, state.adj);
+        process(d.data, w, h, state.look, state.adj, { fast: true });
         pctx.putImageData(d, 0, 0);
       }
     }
@@ -649,7 +704,7 @@ body.live .tag:first-of-type { color: #ff5a4f; }
     c.getContext('2d').drawImage(v, 0, 0);
     const f = $('flash'); f.hidden = false; f.style.animation = 'none'; void f.offsetWidth; f.style.animation = '';
     setTimeout(() => { f.hidden = true; }, 260);
-    const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.95));
+    const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.98));
     c.width = c.height = 1;
     if (!blob) return;
     const added = await addFiles([new File([blob], 'live.jpg', { type: 'image/jpeg' })], true, true);
@@ -704,9 +759,9 @@ body.live .tag:first-of-type { color: #ff5a4f; }
     const src = idx < 0 ? SAMPLE : state.items[idx].img;
     const r = render(src, 16e6);           // iOS canvas limit ≈ 16.7MP
     const d = r.x.getImageData(0,0,r.w,r.h);
-    process(d.data, r.w, r.h, state.look, state.adj);
+    process(d.data, r.w, r.h, state.look, state.adj, { sharpen: 0.35 });
     r.x.putImageData(d,0,0);
-    const blob = await new Promise(res => r.cv.toBlob(res, 'image/jpeg', 0.93));
+    const blob = await new Promise(res => r.cv.toBlob(res, 'image/jpeg', 0.96));
     r.cv.width = r.cv.height = 1;
     return blob;
   }
